@@ -1,0 +1,69 @@
+# ── Virtual environment ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+wheels/
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── Testing / coverage ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.lcov
+junit*.xml
+
+# ── Type-checking / linting caches ───────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+
+# ── Alembic (added when Task 2 begins) ───────────────────────────────────────
+# alembic/versions/*.pyc  # already covered by *.pyc above
+
+# ── IDE / editor ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Node / frontend (added when dashboard task begins) ────────────────────────
+node_modules/
+dist/
+.next/
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Temporary verification scripts ────────────────────────────────────────────
+check_health.py
+uvicorn_test.log
+
+# Local audio samples (TTS tests)
+*.wav
