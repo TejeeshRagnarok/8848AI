@@ -106,6 +106,32 @@ def is_affirmative(text: str) -> bool:
     return all(w in _AFFIRMATIVE for w in words) and any(w in _AFFIRMATIVE_CORE for w in words)
 
 
+# ── Caller ID ────────────────────────────────────────────────────────────────
+
+# Same shape the order schema accepts for customer_phone (5-20 characters).
+_CALLER_ID = re.compile(r"^\+?[0-9][0-9 -]{3,18}[0-9]$")
+
+
+def normalize_caller(raw: Any) -> str | None:
+    """The caller ID Exotel reported, if it looks like a phone number.
+
+    Withheld, unknown or malformed values become None, so the agent asks for
+    a contact number instead.  Every caller Exotel connects is served either
+    way: the number only pre-fills the order's contact number and is never
+    treated as proof of identity.
+    """
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    return value if _CALLER_ID.match(value) else None
+
+
+def mask_phone(phone: str | None) -> str:
+    """Last four digits only, for logs."""
+    digits = re.sub(r"\D", "", phone or "")
+    return f"***{digits[-4:]}" if len(digits) >= 4 else "unknown"
+
+
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
 
@@ -370,14 +396,14 @@ async def exotel_voicebot(
                     stream_sid=str(start.get("stream_sid") or message.get("stream_sid") or ""),
                     call_sid=str(start.get("call_sid") or "unknown"),
                     restaurant_id=restaurant_id,
-                    caller=start.get("from") or None,
+                    caller=normalize_caller(start.get("from")),
                     speech=speech,
                     store=store,
                     provider_factory=provider_factory,
                     db_factory=db_factory,
                     config=config,
                 )
-                logger.info("Exotel call %s started", call.call_sid)
+                logger.info("Exotel call %s started (caller %s)", call.call_sid, mask_phone(call.caller))
                 worker = asyncio.create_task(call.run())
             elif call is None:
                 continue  # "connected", or anything before "start"

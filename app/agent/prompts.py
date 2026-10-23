@@ -50,11 +50,15 @@ quote the formatted text."""
 
 
 def caller_context(phone: str) -> str:
-    """Extra system note for phone calls: the verified caller ID."""
+    """Extra system note for phone calls: the caller ID reported by the
+    telephony provider.  It is a convenience for the contact number only; it
+    proves nothing about who the caller is."""
     return (
-        f"The customer is calling from the phone number {json.dumps(phone)}. If they want an "
-        "order, ask whether to use this number for it instead of asking them to read one out, "
-        "and use it as customer_phone if they agree."
+        f"The caller ID reported for this call is {json.dumps(phone)}. If the customer wants an "
+        "order, ask whether to use this number as their contact number instead of asking them to "
+        "read one out, and use it as customer_phone only if they agree. Caller ID is not proof of "
+        "identity: never tell the customer they are verified or recognised, and never use the "
+        "number to look up, change or discuss any order other than ones placed in this call."
     )
 
 

@@ -428,6 +428,53 @@ class TestExotelCall:
                 pass
 
 
+class TestCallerId:
+    """Any caller Exotel connects is served; caller ID only pre-fills the
+    contact number and is never treated as identity."""
+
+    @pytest.mark.parametrize("caller", ["08000000001", "09000000201", "+91 90000 00201"])
+    def test_any_caller_is_served_and_number_passed_through(self, call_env, monkeypatch, caller) -> None:
+        monkeypatch.setattr(exotel, "RestaurantAgent", FakeAgent)
+        call_env["speech"] = FakeSpeech("One tea")
+        FakeAgent.responses = [reply("One tea?")]
+        with TestClient(app).websocket_connect(exotel.WS_PATH) as ws:
+            start(ws, caller=caller)
+            finish_playback(ws, receive_reply(ws)[-1])
+            speak(ws)
+            receive_reply(ws)
+        assert FakeAgent.requests[0][1] == caller
+
+    @pytest.mark.parametrize("raw", [None, "", "anonymous", "unknown", "+91", "12",
+                                     "0900<script>", 9000000201, "1" * 25])  # fmt: skip
+    def test_withheld_or_malformed_caller_id_still_served(self, call_env, monkeypatch, raw) -> None:
+        monkeypatch.setattr(exotel, "RestaurantAgent", FakeAgent)
+        call_env["speech"] = FakeSpeech("One tea")
+        FakeAgent.responses = [reply("Sure. What number should I use for the order?")]
+        with TestClient(app).websocket_connect(exotel.WS_PATH) as ws:
+            start(ws, caller=raw)
+            finish_playback(ws, receive_reply(ws)[-1])
+            speak(ws)
+            receive_reply(ws)
+        assert FakeAgent.requests[0][1] is None  # the agent asks for a number instead
+
+    def test_logs_mask_the_caller_number(self, call_env, caplog) -> None:
+        with caplog.at_level("INFO", logger="app"):
+            with TestClient(app).websocket_connect(exotel.WS_PATH) as ws:
+                start(ws, caller="09000000201")
+                receive_reply(ws)
+        assert "caller ***0201" in caplog.text
+        assert "9000000201" not in caplog.text
+
+    def test_mask_phone(self) -> None:
+        assert exotel.mask_phone("+91 90000 00201") == "***0201"
+        assert exotel.mask_phone(None) == exotel.mask_phone("12") == "unknown"
+
+    def test_prompt_never_presents_caller_id_as_verification(self) -> None:
+        note = caller_context("09000000201")
+        assert "not proof of identity" in note and "never tell the customer they are verified" in note
+        assert "verified caller" not in note.lower()
+
+
 class TestAuth:
     @pytest.fixture
     def secured(self, call_env):

@@ -30,6 +30,16 @@ from app.telephony import exotel
 
 logger = logging.getLogger(__name__)
 
+# Uvicorn only configures its own loggers, so the application's INFO logs
+# (call starts, orders, payments) were silently dropped.  Messages never
+# contain secrets or full phone numbers.
+_app_logger = logging.getLogger("app")
+if not _app_logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(levelname)s:     %(name)s: %(message)s"))
+    _app_logger.addHandler(_handler)
+    _app_logger.setLevel(logging.INFO)
+
 
 def _sweep_once() -> None:
     with get_session_factory()() as session:
