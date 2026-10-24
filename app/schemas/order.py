@@ -48,6 +48,12 @@ class OrderCreate(RequestSchema):
         return items
 
 
+class WalkInOrderCreate(OrderCreate):
+    """A counter sale recorded by staff: the contact number is optional."""
+
+    customer_phone: Phone | None = None
+
+
 class OrderStatusUpdate(RequestSchema):
     status: OrderStatus
 
@@ -83,7 +89,7 @@ class OrderRead(BaseModel):
     restaurant_id: uuid.UUID
     order_number: str
     customer_name: str | None
-    customer_phone: str
+    customer_phone: str | None  # absent only for walk-in sales
     status: OrderStatus
     subtotal_paise: int
     total_paise: int
@@ -91,6 +97,7 @@ class OrderRead(BaseModel):
     idempotency_key: str
     items: list[OrderItemRead]
     inventory_state: str = "none"
+    source: str = "API"  # channel: AI_VOICE, AI_CHAT, WALK_IN_POS, API, UNKNOWN
     reservation_expires_at: datetime | None = None
     cancel_reason: str | None = None
     payment: PaymentSummary | None = None

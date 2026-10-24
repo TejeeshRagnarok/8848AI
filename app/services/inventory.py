@@ -160,6 +160,42 @@ def set_stock(
     return item
 
 
+def adjust_stock(
+    session: Session, menu_item_id: uuid.UUID, *, change: int, reason: str
+) -> MenuItem:
+    """Add (delivery, correction) or remove (waste, breakage, count error)
+    physical units, with a reason recorded in the ledger.
+
+    Runs under the inventory row lock.  On-hand stock can never go below the
+    units reserved for unpaid orders (so below zero); an untracked item
+    starts being tracked by a positive change.
+    """
+    if change == 0:
+        raise ConflictError("The stock change must not be zero.")
+    item = session.get(MenuItem, menu_item_id)
+    if item is None:
+        raise NotFoundError("Menu item not found.")
+    row = lock_inventory(session, [menu_item_id]).get(menu_item_id)
+    if row is None:
+        if change < 0:
+            raise ConflictError("This item's stock is not tracked yet; add stock first.")
+        row = InventoryItem(menu_item_id=menu_item_id, on_hand=0, reserved=0, sold=0)
+        session.add(row)
+        session.flush()
+    if row.on_hand + change < row.reserved:
+        raise ConflictError(
+            f"Cannot remove {-change}: only {row.available} available "
+            f"({row.reserved} reserved for unpaid orders)."
+        )
+    row.on_hand += change
+    kind = MovementKind.RESTOCK if change > 0 else MovementKind.ADJUST
+    _record(session, row, kind, abs(change), note=reason)
+    commit(session)
+    session.refresh(item)
+    logger.info("Stock for menu item %s changed by %+d", menu_item_id, change)
+    return item
+
+
 def list_stock(session: Session, restaurant_id: uuid.UUID) -> list[MenuItem]:
     """All of a restaurant's menu items with their stock (tracked or not)."""
     get_restaurant(session, restaurant_id)

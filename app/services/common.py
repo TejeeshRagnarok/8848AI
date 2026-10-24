@@ -36,6 +36,7 @@ class UnprocessableError(ServiceError):
 # Client-safe messages for known constraints (names come from Base's naming convention).
 _CONSTRAINT_MESSAGES = {
     "uq_restaurants_slug": "A restaurant with this slug already exists.",
+    "uq_menu_items_restaurant_active_name": "An active menu item with this name already exists.",
     "fk_menu_items_restaurant_id_restaurants": "The referenced restaurant does not exist.",
     "ck_menu_items_price_paise_positive": "price_paise must be a positive integer.",
     "ck_restaurants_slug_format": "slug has an invalid format.",

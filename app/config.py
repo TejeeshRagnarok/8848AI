@@ -65,6 +65,13 @@ class Settings(BaseSettings):
     # HMAC secret for per-order customer tokens (X-Order-Token).  Unset: a
     # random per-process secret is used, so tokens stop working on restart.
     order_token_secret: SecretStr | None = None
+    # Dashboard sign-in lifetime, and the stock level at or below which an
+    # item counts as "low stock" in the dashboard summary.
+    dashboard_session_hours: int = 12
+    dashboard_low_stock_threshold: int = 5
+    # How often the dashboard's live-update stream checks for changes (one
+    # small aggregate query per open dashboard).
+    dashboard_events_seconds: float = 3.0
 
     # ── Orders: stock reservations ───────────────────────────────────────────
     # How long a placed, unpaid order holds its stock before it expires.

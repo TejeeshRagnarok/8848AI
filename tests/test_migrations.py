@@ -17,6 +17,7 @@ BASELINE = "5900f7d42043"
 MENU_REVISION = "25620f605c18"
 ORDERS_REVISION = "09b7b2a79c59"
 INVENTORY_REVISION = "802abd40fb6d"
+SOURCE_REVISION = "7a03688b7bbc"
 
 
 def _config(buffer: io.StringIO | None = None) -> Config:
@@ -38,8 +39,11 @@ def script() -> ScriptDirectory:
 
 
 class TestRevisionChain:
-    def test_single_head_is_inventory_revision(self, script: ScriptDirectory) -> None:
-        assert script.get_heads() == [INVENTORY_REVISION]
+    def test_single_head_is_source_revision(self, script: ScriptDirectory) -> None:
+        assert script.get_heads() == [SOURCE_REVISION]
+
+    def test_source_revision_follows_inventory_revision(self, script: ScriptDirectory) -> None:
+        assert script.get_revision(SOURCE_REVISION).down_revision == INVENTORY_REVISION
 
     def test_inventory_revision_follows_orders_revision(self, script: ScriptDirectory) -> None:
         assert script.get_revision(INVENTORY_REVISION).down_revision == ORDERS_REVISION
@@ -55,7 +59,7 @@ class TestRevisionChain:
 
     def test_linear_history(self, script: ScriptDirectory) -> None:
         revisions = [r.revision for r in script.walk_revisions()]
-        assert revisions == [INVENTORY_REVISION, ORDERS_REVISION, MENU_REVISION, BASELINE]
+        assert revisions == [SOURCE_REVISION, INVENTORY_REVISION, ORDERS_REVISION, MENU_REVISION, BASELINE]
 
 
 class TestMenuMigrationSql:
@@ -215,3 +219,30 @@ class TestInventoryMigrationSql:
         assert "DROP TABLE inventory_items;" in downgrade_sql
         assert "DROP TABLE orders" not in downgrade_sql
         assert f"version_num='{ORDERS_REVISION}'" in downgrade_sql
+
+
+class TestSourceMigrationSql:
+    @pytest.fixture(scope="class")
+    def upgrade_sql(self) -> str:
+        return _offline_sql("upgrade", f"{INVENTORY_REVISION}:{SOURCE_REVISION}")
+
+    @pytest.mark.parametrize(
+        "fragment",
+        [
+            "ALTER TABLE menu_items ADD COLUMN is_active BOOLEAN DEFAULT true NOT NULL",
+            "CREATE UNIQUE INDEX uq_menu_items_restaurant_active_name ON menu_items "
+            "(restaurant_id, lower(name)) WHERE is_active",
+            "UPDATE orders SET source = 'UNKNOWN'",
+            "ALTER TABLE orders ALTER COLUMN source SET NOT NULL",
+            "CONSTRAINT ck_orders_source_valid CHECK "
+            "(source IN ('AI_VOICE', 'AI_CHAT', 'WALK_IN_POS', 'API', 'UNKNOWN'))",
+            "ALTER TABLE orders ALTER COLUMN customer_phone DROP NOT NULL",
+        ],
+    )
+    def test_upgrade_schema_fragments(self, upgrade_sql: str, fragment: str) -> None:
+        assert fragment in upgrade_sql
+
+    def test_upgrade_keeps_existing_rows(self, upgrade_sql: str) -> None:
+        # "DROP NOT NULL" relaxes a column; nothing is dropped or deleted.
+        assert "DROP TABLE" not in upgrade_sql and "DROP COLUMN" not in upgrade_sql
+        assert "DELETE" not in upgrade_sql

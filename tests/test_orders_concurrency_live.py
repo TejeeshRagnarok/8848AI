@@ -26,7 +26,9 @@ from app.models import (
     Restaurant,
 )
 from app.schemas import OrderCreate
+from app.models import OrderSource
 from app.models.payment import DemoOutcome
+from app.schemas.order import WalkInOrderCreate
 from app.services.common import ConflictError, UnprocessableError
 from app.services.inventory import InsufficientStockError
 from app.services.orders import create_order, expire_reservations
@@ -265,3 +267,26 @@ class TestInventoryRaces:
         with Session(engine) as s:
             order = s.get(Order, order_id)
             assert (order.status, order.cancel_reason, order.payment.status) == ("cancelled", "expired", "expired")
+
+    def test_voice_and_counter_racing_for_the_last_item(self, engine, committed_menu) -> None:
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE inventory_items SET on_hand = 1 WHERE menu_item_id = :id"),
+                         {"id": committed_menu["idli"]})  # fmt: skip
+        barrier = threading.Barrier(2)
+
+        def place(source):
+            return _in_session(engine, lambda s: create_order(
+                s, committed_menu["restaurant"],
+                WalkInOrderCreate(items=[{"menu_item_id": str(committed_menu["idli"]), "quantity": 1}],
+                                  idempotency_key=f"last-{source.value}"),
+                source=source), barrier)  # fmt: skip
+
+        with ThreadPoolExecutor(2) as pool:
+            results = list(pool.map(place, [OrderSource.AI_VOICE, OrderSource.WALK_IN_POS]))
+        winners = [r for r in results if not isinstance(r, Exception)]
+        losers = [r for r in results if isinstance(r, InsufficientStockError)]
+        assert len(winners) == 1 and len(losers) == 1, results
+        assert _stock(engine, committed_menu["idli"]) == (1, 1, 0)
+        with Session(engine) as s:
+            sources = s.scalars(select(Order.source).where(Order.restaurant_id == committed_menu["restaurant"])).all()
+        assert len(sources) == 1 and sources[0] in ("AI_VOICE", "WALK_IN_POS")

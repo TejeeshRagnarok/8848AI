@@ -6,7 +6,14 @@ Alembic) and lets string-based relationships between models resolve.
 
 from app.models.inventory import InventoryItem, InventoryMovement, MovementKind
 from app.models.menu_item import MenuItem
-from app.models.order import CancelReason, InventoryState, Order, OrderItem, OrderStatus
+from app.models.order import (
+    CancelReason,
+    InventoryState,
+    Order,
+    OrderItem,
+    OrderSource,
+    OrderStatus,
+)
 from app.models.payment import Payment, PaymentStatus
 from app.models.restaurant import Restaurant
 
@@ -19,6 +26,7 @@ __all__ = [
     "MovementKind",
     "Order",
     "OrderItem",
+    "OrderSource",
     "OrderStatus",
     "Payment",
     "PaymentStatus",

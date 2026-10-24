@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Restaurant Dashboard</title>
+  <link rel="stylesheet" href="/dashboard/static/styles.css">
+  <script src="/dashboard/static/app.js" defer></script>
+</head>
+<body>
+  <!-- Sign-in -->
+  <main id="login-view" class="login" hidden>
+    <form id="login-form" class="login-card" autocomplete="off">
+      <h1>Restaurant Dashboard</h1>
+      <p class="muted">Sign in with the staff key. It is sent once to the server and never stored in this browser.</p>
+      <label>Staff key
+        <input id="login-key" type="password" required maxlength="500" autocomplete="current-password">
+      </label>
+      <label>Restaurant <span class="muted">(optional slug)</span>
+        <input id="login-slug" type="text" maxlength="100" placeholder="spice-garden-demo">
+      </label>
+      <p id="login-error" class="error" role="alert" hidden></p>
+      <button type="submit" class="btn primary">Sign in</button>
+    </form>
+  </main>
+
+  <!-- App -->
+  <div id="app-view" class="app" hidden>
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">&#127860;</span>
+        <div>
+          <strong id="restaurant-name">Restaurant</strong>
+          <div class="muted small">Management dashboard</div>
+        </div>
+      </div>
+      <nav class="nav" aria-label="Sections">
+        <button class="nav-item active" data-view="orders">Live Orders</button>
+        <button class="nav-item" data-view="menu">Menu &amp; Inventory</button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="live"><span id="live-dot" class="dot"></span><span id="live-text">Connecting…</span></div>
+        <button id="sign-out" class="btn ghost small">Sign out</button>
+      </div>
+    </aside>
+
+    <main class="content">
+      <section class="cards" aria-label="Summary">
+        <div class="card"><span class="card-label">Active orders</span><span id="m-active" class="card-value">–</span></div>
+        <div class="card"><span class="card-label">Today's orders</span><span id="m-today" class="card-value">–</span></div>
+        <div class="card"><span class="card-label">Awaiting payment</span><span id="m-unpaid" class="card-value">–</span></div>
+        <div class="card warn"><span class="card-label">Low stock</span><span id="m-low" class="card-value">–</span></div>
+        <div class="card danger"><span class="card-label">Out of stock</span><span id="m-out" class="card-value">–</span></div>
+      </section>
+
+      <!-- Live orders -->
+      <section id="orders-view" class="panel">
+        <header class="panel-head">
+          <div>
+            <h2>Live Order Management</h2>
+            <p class="muted small">Voice, chat, API and walk-in orders. Updates automatically.</p>
+          </div>
+          <button id="walkin-open" class="btn primary">+ Record walk-in sale</button>
+        </header>
+        <div class="toolbar">
+          <input id="o-search" type="search" placeholder="Search order no., name or phone" maxlength="100">
+          <select id="o-status" aria-label="Status">
+            <option value="">All statuses</option>
+            <option value="pending">Pending (awaiting payment)</option>
+            <option value="confirmed">Confirmed</option>
+            <option value="preparing">Preparing</option>
+            <option value="ready">Ready</option>
+            <option value="completed">Completed</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+          <select id="o-source" aria-label="Channel">
+            <option value="">All channels</option>
+            <option value="AI_VOICE">AI voice</option>
+            <option value="AI_CHAT">AI chat</option>
+            <option value="WALK_IN_POS">Walk-in / POS</option>
+            <option value="API">API</option>
+            <option value="UNKNOWN">Unknown (older)</option>
+          </select>
+          <label class="check"><input id="o-active" type="checkbox"> Active only</label>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr>
+              <th>Order</th><th>Time</th><th>Customer</th><th>Channel</th><th>Items</th>
+              <th class="num">Total</th><th>Payment</th><th>Status</th><th>Reservation</th>
+            </tr></thead>
+            <tbody id="orders-body"></tbody>
+          </table>
+          <div id="orders-state" class="state"></div>
+        </div>
+        <div class="pager"><span id="orders-count" class="muted small"></span>
+          <button id="orders-more" class="btn ghost small" hidden>Load more</button></div>
+      </section>
+
+      <!-- Menu & inventory -->
+      <section id="menu-view" class="panel" hidden>
+        <header class="panel-head">
+          <div>
+            <h2>Menu &amp; Live Inventory</h2>
+            <p class="muted small">The voice agent reads this same menu and stock on every turn.</p>
+          </div>
+          <button id="item-new" class="btn primary">+ Add menu item</button>
+        </header>
+        <div class="toolbar">
+          <input id="m-search" type="search" placeholder="Filter by name or category" maxlength="100">
+          <label class="check"><input id="m-retired" type="checkbox"> Show retired dishes</label>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr>
+              <th>Item</th><th>Category</th><th class="num">Price</th><th class="num">Sellable</th>
+              <th class="num">On hand</th><th class="num">Reserved</th><th class="num">Sold</th>
+              <th>Status</th><th>Actions</th>
+            </tr></thead>
+            <tbody id="menu-body"></tbody>
+          </table>
+          <div id="menu-state" class="state"></div>
+        </div>
+        <p class="note">Every counter sale must be recorded here (walk-in sale) or through an integrated POS.
+          Sales that are not recorded cannot be reflected in stock, and the voice agent would offer food that is gone.</p>
+      </section>
+    </main>
+  </div>
+
+  <!-- Order detail drawer -->
+  <aside id="drawer" class="drawer" hidden aria-label="Order details">
+    <div class="drawer-head"><h3 id="d-title">Order</h3><button id="d-close" class="btn ghost small" aria-label="Close">✕</button></div>
+    <div id="d-body" class="drawer-body"></div>
+    <div id="d-actions" class="drawer-actions"></div>
+  </aside>
+
+  <!-- Generic dialog -->
+  <dialog id="dialog">
+    <form method="dialog" id="dialog-form">
+      <h3 id="dialog-title"></h3>
+      <div id="dialog-body"></div>
+      <p id="dialog-error" class="error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button value="cancel" formnovalidate class="btn ghost" id="dialog-cancel">Cancel</button>
+        <button value="ok" class="btn primary" id="dialog-ok">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+</body>
+</html>

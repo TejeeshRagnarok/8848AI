@@ -31,7 +31,7 @@ from app.agent.schemas import AgentChatRequest, AgentChatResponse, PendingOrderS
 from app.agent.sessions import AgentSession, PendingOrder, SessionStore
 from app.agent.tools import TOOL_DEFINITIONS, ToolExecutor, format_money, proposal_result
 from app.config import Settings, settings
-from app.models import Order, Restaurant
+from app.models import Order, OrderSource, Restaurant
 from app.schemas import OrderCreate, OrderRead
 from app.services import orders as order_service
 from app.services.common import ConflictError, NotFoundError, UnprocessableError
@@ -67,6 +67,7 @@ class RestaurantAgent:
         request: AgentChatRequest,
         *,
         caller_phone: str | None = None,
+        source: OrderSource = OrderSource.AI_CHAT,
     ) -> AgentChatResponse:
         """``caller_phone`` is the number a phone call came from (set by the
         telephony layer, never by the customer); the model is told it so it can
@@ -90,7 +91,7 @@ class RestaurantAgent:
             raise ConflictError("This conversation is already handling a message; please retry.")
         try:
             if request.confirm_proposal_id is not None:
-                return self._confirm(restaurant, session, request)
+                return self._confirm(restaurant, session, request, source)
             return self._converse(restaurant, session, request.message, provider, caller_phone)
         finally:
             session.lock.release()
@@ -180,7 +181,11 @@ class RestaurantAgent:
     # ── Confirmation turns (server-only, no model) ───────────────────────────
 
     def _confirm(
-        self, restaurant: Restaurant, session: AgentSession, request: AgentChatRequest
+        self,
+        restaurant: Restaurant,
+        session: AgentSession,
+        request: AgentChatRequest,
+        source: OrderSource = OrderSource.AI_CHAT,
     ) -> AgentChatResponse:
         proposal_id = request.confirm_proposal_id
         turn: list[dict[str, Any]] = []
@@ -209,7 +214,7 @@ class RestaurantAgent:
         )
         try:
             result = order_service.create_order(
-                self._db, restaurant.id, data, expected=pending.quote
+                self._db, restaurant.id, data, expected=pending.quote, source=source
             )
         except QuoteChangedError as exc:
             session.pending = PendingOrder.new(

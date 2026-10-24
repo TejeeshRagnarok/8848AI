@@ -27,6 +27,7 @@ from app.agent.schemas import AgentChatResponse, PendingOrderSummary
 from app.agent.sessions import InMemorySessionStore
 from app.config import Settings
 from app.main import app
+from app.models import OrderSource
 from app.routers.agent import get_provider_factory, get_session_store
 from app.telephony import exotel
 from app.telephony.audio import (
@@ -238,11 +239,13 @@ class FakeAgent:
 
     requests: list = []
     responses: list = []
+    sources: list = []
 
     def __init__(self, db, store, provider_factory) -> None:
         pass
 
-    def chat(self, restaurant_id, request, *, caller_phone=None):
+    def chat(self, restaurant_id, request, *, caller_phone=None, source=None):
+        FakeAgent.sources.append(source)
         FakeAgent.requests.append((request, caller_phone))
         return FakeAgent.responses.pop(0)
 
@@ -289,7 +292,7 @@ def call_env(monkeypatch):
     app.dependency_overrides[exotel.get_settings] = lambda: env["settings"]
     app.dependency_overrides[get_session_store] = lambda: store
     app.dependency_overrides[get_provider_factory] = lambda: (lambda: env["provider"])
-    FakeAgent.requests, FakeAgent.responses = [], []
+    FakeAgent.requests, FakeAgent.responses, FakeAgent.sources = [], [], []
     try:
         yield env
     finally:
@@ -363,6 +366,7 @@ class TestExotelCall:
         assert phone == "09876543210"
         assert first.confirm_proposal_id is None and first.session_id is None
         assert second.confirm_proposal_id == "a" * 32 and second.session_id == "s" * 32
+        assert set(FakeAgent.sources) == {OrderSource.AI_VOICE}  # phone orders are labelled
         assert call_env["speech"].spoken[1].endswith(exotel.CONFIRM_HINT)
 
     def test_dtmf_1_confirms_and_other_speech_does_not(self, call_env, monkeypatch) -> None:

@@ -82,6 +82,16 @@ class InventoryState(StrEnum):
     RETURNED = "returned"
 
 
+class OrderSource(StrEnum):
+    """Channel an order came in through."""
+
+    AI_VOICE = "AI_VOICE"  # phone call handled by the voice agent
+    AI_CHAT = "AI_CHAT"  # the agent chat API
+    WALK_IN_POS = "WALK_IN_POS"  # recorded by staff on the dashboard
+    API = "API"  # the public order API
+    UNKNOWN = "UNKNOWN"  # created before channels were recorded
+
+
 class CancelReason(StrEnum):
     CUSTOMER = "customer"
     STAFF = "staff"
@@ -96,6 +106,7 @@ order_number_seq = Sequence("order_number_seq", start=100001, metadata=Base.meta
 _STATUS_VALUES = ", ".join(f"'{s.value}'" for s in OrderStatus)
 _INVENTORY_VALUES = ", ".join(f"'{s.value}'" for s in InventoryState)
 _CANCEL_VALUES = ", ".join(f"'{s.value}'" for s in CancelReason)
+_SOURCE_VALUES = ", ".join(f"'{s.value}'" for s in OrderSource)
 
 
 class Order(TimestampMixin, Base):
@@ -107,6 +118,7 @@ class Order(TimestampMixin, Base):
         CheckConstraint("subtotal_paise >= 0", name="subtotal_paise_nonnegative"),
         CheckConstraint("total_paise >= 0", name="total_paise_nonnegative"),
         CheckConstraint(f"inventory_state IN ({_INVENTORY_VALUES})", name="inventory_state_valid"),
+        CheckConstraint(f"source IN ({_SOURCE_VALUES})", name="source_valid"),
         CheckConstraint(
             f"cancel_reason IS NULL OR cancel_reason IN ({_CANCEL_VALUES})", name="cancel_reason_valid"
         ),
@@ -137,7 +149,8 @@ class Order(TimestampMixin, Base):
         server_default=text("'ORD-' || nextval('order_number_seq')"),
     )
     customer_name: Mapped[str | None] = mapped_column(String(100))
-    customer_phone: Mapped[str] = mapped_column(String(20))
+    # Optional only for walk-in sales; every other channel requires it.
+    customer_phone: Mapped[str | None] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(
         String(20), default=OrderStatus.PENDING.value, server_default=OrderStatus.PENDING.value
     )
@@ -154,6 +167,9 @@ class Order(TimestampMixin, Base):
     # When an unpaid order's stock reservation lapses (null once not pending).
     reservation_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancel_reason: Mapped[str | None] = mapped_column(String(30))
+    source: Mapped[str] = mapped_column(
+        String(20), default=OrderSource.API.value, server_default=OrderSource.API.value
+    )
 
     restaurant: Mapped[Restaurant] = relationship()
     payment: Mapped[Payment | None] = relationship(back_populates="order", uselist=False)

@@ -34,7 +34,7 @@ class TestOrderMetadata:
         assert (order_number_seq.name, order_number_seq.start) == ("order_number_seq", 100001)
 
     def test_required_and_optional_columns(self) -> None:
-        optional = {"customer_name", "notes", "reservation_expires_at", "cancel_reason"}
+        optional = {"customer_name", "customer_phone", "notes", "reservation_expires_at", "cancel_reason"}
         for col in orders.columns:
             assert col.nullable is (col.name in optional), col.name
 

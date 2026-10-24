@@ -362,6 +362,61 @@ an LLM tested in those languages.
 
 ---
 
+## Restaurant Dashboard
+
+Open **http://127.0.0.1:8000/dashboard** (or `https://<your-ngrok-host>/dashboard`) and
+sign in with `STAFF_API_KEY` (optionally a restaurant slug; default is
+`EXOTEL_RESTAURANT_ID`). Two sections:
+
+- **Live Orders**: every channel (AI voice, AI chat, walk-in/POS, API; older orders show
+  "Unknown"), with search (order number, name, phone digits), status/channel filters,
+  order details (lines, prices, total, contact number or "Not provided", payment and
+  reservation expiry) and actions: mark paid (demo), start preparing, mark ready,
+  complete, cancel. **Record walk-in sale** creates a `WALK_IN_POS` order priced and
+  stock-checked by the server (contact number optional).
+- **Menu & Inventory**: price, sellable quantity, on hand, reserved, sold and status per
+  dish; add items (with optional starting stock), edit, adjust stock up or down with a
+  reason (stock ledger), switch on/off, and retire/restore (retiring never deletes:
+  past orders and the ledger keep pointing at the dish).
+
+**One source of truth.** The dashboard, the voice/chat agent and the public API use the
+same services and PostgreSQL rows. The agent reads the live menu and stock on every
+turn, so a price change, stock count or retired dish applies to the very next caller;
+orders reserve stock under row locks, so a counter sale and a phone order can never
+both take the last unit. **Every counter sale must be recorded** (walk-in sale here, or a
+future POS integration): unrecorded sales cannot be reflected in stock. No POS system is
+integrated yet.
+
+**Live updates** use Server-Sent Events (`/api/v1/dashboard/events`): the server runs one
+small aggregate query every `DASHBOARD_EVENTS_SECONDS` (3 s) per open dashboard and
+tells the browser to refresh when anything changed; if the stream drops, the page polls
+every 15 s.
+
+**Security.** Signing in sets a signed, `HttpOnly`, `SameSite=Strict` session cookie
+bound to one restaurant (12 h, `DASHBOARD_SESSION_HOURS`); the staff key is not stored
+in the browser, and rotating `STAFF_API_KEY` signs everyone out. Every dashboard
+endpoint takes the restaurant from the session, never from the request; changes also
+need an `X-Requested-With: dashboard` header (blocks cross-site forms). Five failed
+sign-ins per client per 5 minutes are allowed. Prices, totals, payment state and stock
+are never accepted from the browser. Payments remain **demo only**.
+
+| Method | Path (`/api/v1/dashboard`) | Purpose |
+|---|---|---|
+| `POST`/`GET`/`DELETE` | `/session` | Sign in / who am I / sign out |
+| `GET` | `/summary` | Active, today's, awaiting payment, low and out of stock |
+| `GET` | `/events` | Live change stream (SSE) |
+| `GET` | `/orders?status=&source=&active_only=&q=` | Orders of this restaurant |
+| `GET` | `/orders/{id}` | One order |
+| `POST` | `/orders/{id}/status`, `/orders/{id}/cancel`, `/orders/{id}/mark-paid` | Order actions |
+| `POST` | `/orders/walk-in` | Record a counter sale |
+| `GET`/`POST` | `/menu` | Menu with stock / add item |
+| `PATCH` | `/menu/{id}` | Edit item, switch on/off |
+| `POST` | `/menu/{id}/stock` | Stock change with reason |
+| `POST` | `/menu/{id}/deactivate`, `/menu/{id}/activate` | Retire / restore |
+| `GET` | `/menu/{id}/movements` | Stock ledger |
+
+---
+
 ## Demo Walkthrough (empty database → completed, paid order)
 
 > Everything below is **DEMO PAYMENT MODE**: payments are simulated and no real money
@@ -571,6 +626,9 @@ See [`.env.example`](.env.example) for the full list with descriptions.
 | `ORDER_TOKEN_SECRET` | `None` | HMAC secret for customer order tokens (unset: per-process, lost on restart) |
 | `ORDER_RESERVATION_TTL_SECONDS` | `600` | How long an unpaid order holds its stock |
 | `RESERVATION_SWEEP_SECONDS` | `60` | Expiry sweep interval (`0` disables the background sweep) |
+| `DASHBOARD_SESSION_HOURS` | `12` | Dashboard sign-in lifetime |
+| `DASHBOARD_LOW_STOCK_THRESHOLD` | `5` | "Low stock" level in the dashboard summary |
+| `DASHBOARD_EVENTS_SECONDS` | `3` | How often the live-update stream checks for changes |
 | `EXOTEL_*`, `SPEECH_*`, `STT_*`, `TTS_*`, `VAD_*` | see `.env.example` | Phone calls and speech |
 
 ---

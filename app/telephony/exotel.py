@@ -37,6 +37,7 @@ from app.agent.schemas import MAX_MESSAGE_CHARS, AgentChatRequest
 from app.agent.service import RestaurantAgent
 from app.agent.sessions import SessionStore
 from app.config import Settings, settings
+from app.models import OrderSource
 from app.database import get_session_factory
 from app.routers.agent import get_provider_factory, get_session_store
 from app.services.common import ConflictError, NotFoundError
@@ -324,7 +325,9 @@ class ExotelCall:
         )
         with self.db_factory() as db:
             agent = RestaurantAgent(db, self.store, self.provider_factory)
-            response = agent.chat(self.restaurant_id, request, caller_phone=self.caller)
+            response = agent.chat(
+                self.restaurant_id, request, caller_phone=self.caller, source=OrderSource.AI_VOICE
+            )
         self.session_id = response.session_id
         previous = self.pending_proposal
         self.pending_proposal = (

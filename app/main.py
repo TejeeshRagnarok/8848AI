@@ -6,11 +6,13 @@ Run locally with:
 
 import asyncio
 import logging
+from pathlib import Path
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
@@ -18,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import DatabaseUnavailableError, get_db, get_session_factory
 from app.agent.llm import LLMNotConfiguredError, LLMResponseError, LLMUnavailableError
-from app.routers import agent, inventory, menu_items, orders, payments, restaurants
+from app.routers import agent, dashboard, inventory, menu_items, orders, payments, restaurants
 from app.services.orders import expire_reservations
 from app.services.common import (
     ConflictError,
@@ -160,6 +162,30 @@ app.include_router(inventory.router)
 app.include_router(payments.router)
 app.include_router(agent.router)
 app.include_router(exotel.router)
+app.include_router(dashboard.router)
+
+
+# ── Dashboard (static single-page app; data via /api/v1/dashboard) ────────────
+
+DASHBOARD_DIR = Path(__file__).resolve().parent / "dashboard"
+app.mount("/dashboard/static", StaticFiles(directory=DASHBOARD_DIR), name="dashboard-static")
+
+_DASHBOARD_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
+
+
+@app.get("/dashboard", include_in_schema=False)
+def dashboard_page() -> FileResponse:
+    """The staff dashboard.  The page itself holds no data; everything is
+    loaded after sign-in from the authenticated dashboard API."""
+    return FileResponse(DASHBOARD_DIR / "index.html", headers=_DASHBOARD_HEADERS)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────

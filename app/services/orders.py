@@ -38,6 +38,7 @@ from app.models import (
     MenuItem,
     Order,
     OrderItem,
+    OrderSource,
     OrderStatus,
     Payment,
     PaymentStatus,
@@ -188,6 +189,13 @@ def _line_errors(
                 "msg": "Menu item not found on this restaurant's menu.",
                 "input": str(line.menu_item_id),
             })
+        elif not item.is_active:
+            errors.append({
+                "type": "menu_item_unavailable",
+                "loc": loc,
+                "msg": f"'{item.name}' is no longer on the menu.",
+                "input": str(line.menu_item_id),
+            })
         elif not item.is_available:
             errors.append({
                 "type": "menu_item_unavailable",
@@ -248,6 +256,7 @@ def create_order(
     data: OrderCreate,
     *,
     expected: OrderQuote | None = None,
+    source: OrderSource = OrderSource.API,
 ) -> OrderCreationResult:
     """Validate, price, reserve stock for and persist an order, with its
     pending demo payment, in one transaction.
@@ -256,6 +265,7 @@ def create_order(
     pricing differs from it, ``QuoteChangedError`` is raised before anything is
     written; the error carries the new quote.  ``InsufficientStockError``
     (409) if a tracked item lacks stock; nothing is written then either.
+    ``source`` records the channel (voice agent, chat, walk-in, API).
     """
     # 404 if missing; FOR SHARE so it cannot be deactivated mid-order.
     restaurant = get_restaurant(session, restaurant_id, lock=True)
@@ -296,6 +306,7 @@ def create_order(
         notes=data.notes,
         idempotency_key=key,
         request_hash=fingerprint,
+        source=source.value,
         status=OrderStatus.PENDING.value,
         subtotal_paise=subtotal,
         total_paise=quote.total_paise,  # no taxes, fees or discounts yet

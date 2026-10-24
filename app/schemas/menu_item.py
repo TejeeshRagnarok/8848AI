@@ -42,6 +42,7 @@ class MenuItemRead(BaseModel):
     category: str | None
     price_paise: int
     is_available: bool
+    is_active: bool = True  # False: retired from the menu (history kept)
     # Stock (computed from inventory): untracked items have no quantity.
     stock_tracked: bool = False
     available_quantity: int | None = None

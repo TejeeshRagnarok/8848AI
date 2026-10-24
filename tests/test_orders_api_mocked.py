@@ -174,7 +174,7 @@ def _service_session(*, existing_after_conflict, commit_error) -> MagicMock:
     session = MagicMock(spec=Session)
     session.get.return_value = SimpleNamespace(is_active=True, currency="INR")
     session.scalar.side_effect = [None, existing_after_conflict]  # key lookups
-    menu_item = SimpleNamespace(id=ITEM, name="Masala Dosa", price_paise=12000, is_available=True)
+    menu_item = SimpleNamespace(id=ITEM, name="Masala Dosa", price_paise=12000, is_available=True, is_active=True)
     # Menu items, then the (empty) stock rows locked for the reservation.
     session.scalars.return_value.all.side_effect = [[menu_item], []]
     session.commit.side_effect = commit_error
@@ -227,7 +227,7 @@ class TestRollbackOnFailure:
         db.get.return_value = SimpleNamespace(is_active=True, currency="INR")
         db.scalar.side_effect = [None, None]
         db.scalars.return_value.all.side_effect = [
-            [SimpleNamespace(id=ITEM, name="Masala Dosa", price_paise=12000, is_available=True)],
+            [SimpleNamespace(id=ITEM, name="Masala Dosa", price_paise=12000, is_available=True, is_active=True)],
             [],  # no tracked stock to reserve
         ]
         db.commit.side_effect = _integrity_error("some_internal_constraint")
