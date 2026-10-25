@@ -1,6 +1,55 @@
 # Restaurant AI Voice Agent
 
-An AI-powered voice ordering agent for restaurants. Customers call an inbound phone number, speak with the AI, browse the menu, place orders, and receive WhatsApp confirmations — all without human intervention.
+An AI-powered voice ordering agent for restaurants. Customers call an inbound phone number, talk to the AI, ask about the menu, build and change their order, and confirm it, with no human on the line. Staff follow orders and stock live on a dashboard.
+
+---
+
+## Demo
+
+> **Video coming soon.** A real phone call: ordering, changing the cart, interrupting the bot,
+> an out-of-stock item with an alternative, confirming, and the order appearing live on the
+> staff dashboard.
+
+<!-- Replace the line above with the video, e.g.
+[![Watch the demo](docs/demo-thumbnail.png)](https://youtu.be/<video-id>)
+or drag the .mp4 into GitHub's README editor. -->
+
+### How a call works
+
+```mermaid
+flowchart LR
+    caller([Caller's phone]) <-->|PSTN| exotel[Exotel Voicebot]
+    exotel <-->|"WebSocket, 8 kHz PCM"| ws[FastAPI call handler]
+    ws --> vad["Voice activity detection<br/>700 ms end of speech, barge-in"]
+    vad --> stt["Speech to text<br/>Whisper large-v3-turbo"]
+    stt --> agent["LLM agent<br/>Llama 3.3 70B, 5 tools"]
+    agent <-->|"live menu, stock, cart"| db[(PostgreSQL)]
+    agent --> guard["Output guardrail<br/>no unverified claims"]
+    guard --> tts["Text to speech<br/>Orpheus, streamed in pieces"]
+    tts -->|"200 ms audio chunks"| ws
+    agent -.->|"proposal only"| confirm{"Caller says yes<br/>or presses 1"}
+    confirm -->|"server places order:<br/>row locks, idempotency"| db
+    db <-->|"Server-Sent Events"| dash[Staff dashboard]
+```
+
+### Highlights
+
+- **The model never places orders.** It can only propose a cart; the server places it after an
+  explicit "yes" (or keypress 1), re-checking prices and stock under row locks.
+- **No hallucinated facts reach the caller.** Replies claiming an order was placed or a payment
+  was taken are replaced unless the database confirmed it in the same turn; tool output is
+  treated as data, never as instructions.
+- **Built for real phone latency.** A fresh menu and cart snapshot in every prompt means most
+  turns need one model call; replies are synthesised and streamed piece by piece; cached
+  phrases start the greeting in about 0.1 s; fillers ("One moment.") cover slow turns.
+- **A caller is never left in silence.** Every stage has a timeout, rate limits are waited out
+  once, failures get a spoken apology, and two failures in a row end the call politely.
+- **Stock can never be oversold.** Reservations with expiry, idempotent orders, ordered row
+  locks and database constraints, covered by concurrency tests against real PostgreSQL.
+- **755 automated tests** (unit, mocked, live PostgreSQL and concurrency races).
+
+**Stack:** Python 3.13, FastAPI, WebSockets, SQLAlchemy 2, Alembic, PostgreSQL, Groq
+(Llama 3.3 70B, Whisper, Orpheus), Exotel, pytest.
 
 ---
 
@@ -276,10 +325,11 @@ the rest of the API works normally. Automated tests never call a real provider.
  "order": null, "order_replayed": false}
 ```
 
-The model can only use four tools, all bound to the restaurant in the URL:
+The model can only use five tools, all bound to the restaurant in the URL:
 `get_menu` (search/category; only orderable items, with live `available_quantity`),
-`get_menu_item`, `create_order`, and `get_order_status` (orders placed in *this*
-conversation only, read from PostgreSQL).
+`get_menu_item`, `create_order`, `get_order_status` (orders placed in *this*
+conversation only, read from PostgreSQL), and `get_popular_items` (most ordered
+dishes from paid orders, or a note that there is too little history to say).
 
 **Orders are never placed by the model.** `create_order` only prices and
 stock-checks the request through the order engine (nothing is reserved) and stores a
@@ -338,13 +388,67 @@ Speech uses an OpenAI-compatible audio API (`/audio/transcriptions`,
 into ≤200-character pieces (Groq Orpheus limit). Other providers can implement the
 `SpeechToText` / `TextToSpeech` protocols in `app/telephony/speech.py`.
 
+**How a call turn works (latency and interruptions).**
+
+- *End of speech*: the caller's turn ends after `VAD_SILENCE_MS` (700 ms) of silence;
+  200 ms of audio before speech is detected is kept so first syllables are not lost.
+  Utterances queued together are transcribed and answered as one turn.
+- *Agent*: every turn sends the model a fresh database snapshot (menu with prices
+  and stock for menus up to 40 items, and the current cart), so most questions need
+  one model call. History keeps only what was said, not tool output. Descriptions
+  come from `get_menu` (tool results are treated as data, never as instructions).
+- *Speech*: replies are synthesised piece by piece and each piece is sent as soon as
+  it is ready. Fixed phrases (greeting, apologies, "One moment.") are synthesised once
+  per process and reused. If a reply takes longer than `VOICE_FILLER_AFTER_MS`, the
+  caller hears "One moment.", and after `VOICE_STILL_WORKING_AFTER_MS` a cached "still
+  working" phrase (e.g. while the model waits out a rate limit).
+- *Barge-in*: when the caller starts talking while the bot is speaking, the server
+  sends Exotel's `clear` (drops queued audio) and stops sending the rest of the reply.
+  Audio is sent in 200 ms chunks, so playback stops within about one chunk plus network
+  delay; Exotel cannot cut a chunk that has started playing.
+- *Stale replies*: if the caller says something new while a reply is being prepared,
+  that reply is not spoken and is removed from the history; one turn answers
+  everything the caller said. A reply that confirms a placed order is always spoken.
+- *Failures*: a provider outage or rate limit gets a spoken apology and the call
+  continues; the call ends only after two failures in a row. A malformed tool call
+  from the model is retried once. Each turn logs
+  `end_of_speech_wait / stt / agent / tts_first_audio / total_to_first_audio` timings
+  (no transcript, no phone numbers).
+
+**Reliability: a caller is never left in silence.**
+
+- *Fixed phrases on disk*: the greeting and the apologies/goodbye are synthesised once
+  and stored in `VOICE_PHRASE_CACHE_DIR` (e.g. `.cache/voice_phrases`, git-ignored); the
+  app prepares missing ones at startup and retries every 2 minutes for an hour if the
+  TTS quota is exhausted. The greeting then starts within ~0.1 s of Exotel's `start`.
+- *Bounded stages*: speech requests time out after `SPEECH_TIMEOUT_SECONDS` (8 s), a whole
+  assistant turn after `VOICE_TURN_TIMEOUT_SECONDS` (30 s, room for one rate-limit pause); a socket that never sends
+  `start` is closed after `VOICE_START_TIMEOUT_SECONDS`, a call whose audio stream stops
+  after `VOICE_IDLE_TIMEOUT_SECONDS`.
+- *Every turn ends in a terminal state*: answered; recovered with a short cached apology
+  (speech not understood, assistant slow or failing, reply audio could not be generated,
+  any unexpected error); or, after two failed turns in a row, a spoken goodbye and the
+  call is closed. If not even cached audio can play, the call is closed rather than left
+  silent.
+- *Logs*: one line per stage, e.g.
+  `voice call=<sid> turn=3 stage=tts result=failed duration=0.05s error=rate_limited audio_bytes=0`,
+  plus a per-turn summary and a per-call summary (`reason`, `duration`, `turns`,
+  `audio_bytes`). Timestamps are included; phone numbers, keys, audio and what the caller
+  said are never logged.
+- *Keep the host awake*: while the server runs on a laptop, its sleep/Modern Standby makes
+  calls wait or fail until it wakes. Disable sleep while testing, or host the server on an
+  always-on machine.
+
 **MVP configuration: Groq for everything, one API key.** LLM
 `llama-3.3-70b-versatile`, STT `whisper-large-v3-turbo`, TTS
 `canopylabs/orpheus-v1-english` (voice e.g. `troy`), all at
 `https://api.groq.com/openai/v1`. Note:
 
 - Orpheus TTS is a Groq **preview** model (may change or be withdrawn) and is
-  **English only**.
+  **English only**. On the free tier it allows **3,600 characters per day** (and
+  1,200 per minute, 100 requests per day): roughly 25-30 short spoken replies a day
+  across all calls. When it runs out the bot can only play cached phrases. Real use
+  needs Groq's paid tier or another TTS provider.
 - Groq bills each transcription as at least 10 seconds, and each caller
   utterance is one request.
 
@@ -621,7 +725,9 @@ See [`.env.example`](.env.example) for the full list with descriptions.
 | `AGENT_MAX_TOOL_CALLS` | `6` | Tool executions per chat request |
 | `AGENT_SESSION_TTL_SECONDS` | `1800` | Idle time before a session expires |
 | `AGENT_MAX_SESSIONS` | `1000` | Sessions kept in memory (least recently used evicted) |
-| `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` | `10` | On HTTP 429, wait up to this `Retry-After` once and retry |
+| `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` | `15` | On HTTP 429, wait up to this `Retry-After` once and retry |
+| `SPEECH_RATE_LIMIT_MAX_WAIT_SECONDS` | `3` | Same for speech requests |
+| `LOG_FILE` | unset | Also write the app log to this file (rotated at 5 MB); e.g. `logs/server.log` |
 | `STAFF_API_KEY` | `None` | `X-Staff-Key` for staff endpoints (unset: they answer 503) |
 | `ORDER_TOKEN_SECRET` | `None` | HMAC secret for customer order tokens (unset: per-process, lost on restart) |
 | `ORDER_RESERVATION_TTL_SECONDS` | `600` | How long an unpaid order holds its stock |

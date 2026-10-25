@@ -58,7 +58,7 @@ class PendingOrderSummary(BaseModel):
     total: str
     currency: str
     customer_name: str | None
-    customer_phone: str
+    customer_phone: str | None
     notes: str | None
 
 

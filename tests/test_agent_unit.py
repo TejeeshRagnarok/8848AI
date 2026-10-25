@@ -68,9 +68,9 @@ class TestAgentChatRequest:
 
 
 class TestToolDefinitions:
-    def test_exactly_four_tools(self) -> None:
+    def test_exactly_five_tools(self) -> None:
         assert [t["function"]["name"] for t in TOOL_DEFINITIONS] == [
-            "get_menu", "get_menu_item", "create_order", "get_order_status",
+            "get_menu", "get_menu_item", "create_order", "get_order_status", "get_popular_items",
         ]  # fmt: skip
 
     @pytest.mark.parametrize("definition", TOOL_DEFINITIONS, ids=lambda d: d["function"]["name"])
@@ -82,6 +82,17 @@ class TestToolDefinitions:
         required = {f for f, info in model.model_fields.items() if info.is_required()}
         assert set(params.get("required", [])) == required
         assert params["additionalProperties"] is False
+
+    def test_quantity_limit_is_checked_by_us_not_the_provider(self, executor) -> None:
+        # A schema "maximum" makes Groq reject the whole generation (HTTP 400
+        # tool_use_failed), so a caller asking for 300 heard only apologies.
+        quantity = TOOL_DEFINITIONS[2]["function"]["parameters"]["properties"]["items"]["items"][
+            "properties"]["quantity"]  # fmt: skip
+        assert "maximum" not in quantity and "100" in quantity["description"]
+        args = {"items": [{"menu_item_id": str(uuid.uuid4()), "quantity": 300}]}
+        result = executor.execute("create_order", json.dumps(args))
+        assert result["error"] == "invalid_arguments"
+        assert any("100" in d["msg"] for d in result["details"])  # the model can explain it
 
     def test_no_restaurant_price_or_confirmation_arguments(self) -> None:
         forbidden = {"restaurant_id", "idempotency_key", "confirmed", "total_paise",
@@ -137,7 +148,6 @@ class TestToolArgumentValidation:
             ("create_order", GOOD_ORDER | {"items": [{"menu_item_id": ITEM, "quantity": 1.5}]}),
             ("create_order", GOOD_ORDER | {"items": []}),
             ("create_order", GOOD_ORDER | {"customer_phone": "call me"}),
-            ("create_order", {"items": GOOD_ORDER["items"]}),
             ("create_order", GOOD_ORDER | {"items": [{"menu_item_id": ITEM, "quantity": 1}] * 2}),
         ],
     )  # fmt: skip
@@ -383,6 +393,50 @@ class TestRateLimitRetry:
         with pytest.raises(LLMUnavailableError):
             provider.complete(MESSAGES, [])
         assert waits == [1.0]
+
+
+class TestToolUseFailedRetry:
+    def _provider(self, responses, **overrides):
+        queue = list(responses)
+        sent: list = []
+
+        def handler(request):
+            sent.append(json.loads(request.content))
+            return queue.pop(0)
+
+        provider = OpenAICompatibleProvider(
+            _config(**overrides), client=httpx.Client(transport=httpx.MockTransport(handler)),
+            sleep=lambda s: None,
+        )  # fmt: skip
+        return provider, sent
+
+    def test_malformed_tool_call_is_retried_once(self) -> None:
+        failed = httpx.Response(400, json={"error": {"code": "tool_use_failed", "message": "bad"}})
+        provider, sent = self._provider([failed, _ok({"role": "assistant", "content": "Hi"})])
+        assert provider.complete(MESSAGES, []).content == "Hi" and len(sent) == 2
+
+    def test_second_failure_is_an_invalid_response(self, caplog) -> None:
+        failed = httpx.Response(400, json={"error": {"code": "tool_use_failed", "message": f"key {API_KEY}"}})
+        provider, sent = self._provider([failed, failed])
+        with caplog.at_level(logging.WARNING), pytest.raises(LLMResponseError):
+            provider.complete(MESSAGES, [])
+        assert len(sent) == 2 and "unexpected_status:tool_use_failed" in caplog.text
+        assert API_KEY not in caplog.text
+
+    def test_other_400s_are_not_retried(self) -> None:
+        provider, sent = self._provider([httpx.Response(400, json={"error": {"code": "invalid_request"}})])
+        with pytest.raises(LLMResponseError):
+            provider.complete(MESSAGES, [])
+        assert len(sent) == 1
+
+    def test_reasoning_effort_sent_only_when_configured(self) -> None:
+        ok = _ok({"role": "assistant", "content": "Hi"})
+        provider, sent = self._provider([ok], llm_reasoning_effort="low")
+        provider.complete(MESSAGES, [])
+        assert sent[0]["reasoning_effort"] == "low"
+        provider, sent = self._provider([_ok({"role": "assistant", "content": "Hi"})])
+        provider.complete(MESSAGES, [])
+        assert "reasoning_effort" not in sent[0]
 
 
 class TestProviderErrors:

@@ -9,6 +9,7 @@ import math
 import struct
 import wave
 from array import array
+from collections import deque
 from dataclasses import dataclass
 
 SAMPLE_WIDTH = 2  # bytes per 16-bit sample
@@ -120,7 +121,9 @@ class UtteranceDetector:
     ``feed`` returns ``speech_start`` when the caller begins talking (used for
     barge-in) and ``utterance`` with the buffered audio once they stop for
     ``silence_ms`` (or hit ``max_utterance_ms``).  Bursts shorter than
-    ``min_speech_ms`` are discarded as noise.
+    ``min_speech_ms`` are discarded as noise.  The ``pre_roll_ms`` of audio
+    just before speech was detected is kept, so quiet first syllables are not
+    cut off; each utterance's audio is separate (nothing leaks between them).
     """
 
     FRAME_MS = 20
@@ -133,8 +136,10 @@ class UtteranceDetector:
         silence_ms: int,
         min_speech_ms: int,
         max_utterance_ms: int,
+        pre_roll_ms: int = 200,
     ) -> None:
         self._frame_bytes = sample_rate * self.FRAME_MS // 1000 * SAMPLE_WIDTH
+        self._pre_roll: deque[bytes] = deque(maxlen=max(0, pre_roll_ms // self.FRAME_MS))
         self._threshold = energy_threshold
         self._silence_frames = max(1, silence_ms // self.FRAME_MS)
         self._min_speech_frames = max(1, min_speech_ms // self.FRAME_MS)
@@ -164,9 +169,12 @@ class UtteranceDetector:
         loud = rms(frame) >= self._threshold
         if not self._in_speech:
             if not loud:
+                if self._pre_roll.maxlen:
+                    self._pre_roll.append(frame)
                 return None
             self._in_speech = True
-            self._buffer = bytearray(frame)
+            self._buffer = bytearray(b"".join(self._pre_roll) + frame)
+            self._pre_roll.clear()
             self._speech_frames, self._silent_run, self._frames = 1, 0, 1
             return VadEvent("speech_start") if self._min_speech_frames == 1 else None
 

@@ -6,6 +6,7 @@ Run locally with:
 
 import asyncio
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -28,7 +29,9 @@ from app.services.common import (
     UnprocessableError,
     constraint_message,
 )
+from app.models import Restaurant
 from app.telephony import exotel
+from app.telephony.speech import SpeechNotConfiguredError, get_speech
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +40,19 @@ logger = logging.getLogger(__name__)
 # contain secrets or full phone numbers.
 _app_logger = logging.getLogger("app")
 if not _app_logger.handlers:
-    _handler = logging.StreamHandler()
-    _handler.setFormatter(logging.Formatter("%(levelname)s:     %(name)s: %(message)s"))
-    _app_logger.addHandler(_handler)
+    # Timestamps let call logs be lined up with ngrok's and Exotel's records.
+    _formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S"
+    )
+    _handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if settings.log_file:
+        Path(settings.log_file).parent.mkdir(parents=True, exist_ok=True)
+        _handlers.append(RotatingFileHandler(
+            settings.log_file, maxBytes=5_000_000, backupCount=3, encoding="utf-8"
+        ))  # fmt: skip
+    for _handler in _handlers:
+        _handler.setFormatter(_formatter)
+        _app_logger.addHandler(_handler)
     _app_logger.setLevel(logging.INFO)
 
 
@@ -61,15 +74,51 @@ async def _reservation_sweeper(interval: int) -> None:
             logger.exception("Reservation sweep failed; will retry")
 
 
+PREWARM_ATTEMPTS = 30  # about an hour: outlasts a rolling quota window
+PREWARM_RETRY_SECONDS = 120
+
+
+async def _prewarm_voice() -> None:
+    """Have the greeting and apology audio ready before the first call, so a
+    call never waits on (or goes silent because of) a live TTS request for
+    them.  Missing phrases only; failures are logged and retried lazily."""
+    try:
+        speech = get_speech()
+        greeting = []
+        if settings.exotel_restaurant_id and settings.database_url:
+            with get_session_factory()() as session:
+                restaurant = session.get(Restaurant, settings.exotel_restaurant_id)
+            if restaurant is not None:
+                greeting.append(exotel.greeting_text(restaurant.name, settings))
+        # The TTS has per-minute and daily budgets: retry missing phrases
+        # (only missing ones are synthesised) until all are ready.
+        for attempt in range(1, PREWARM_ATTEMPTS + 1):
+            ready, failed = await exotel.prewarm_phrases(
+                speech, settings.exotel_sample_rate, settings.voice_phrase_cache_dir, greeting
+            )
+            log = logger.info if not failed else logger.warning
+            log("voice stage=prewarm result=%s attempt=%d phrases_ready=%d phrases_failed=%d",
+                "ok" if not failed else "partial", attempt, ready, failed)  # fmt: skip
+            if not failed:
+                return
+            await asyncio.sleep(PREWARM_RETRY_SECONDS)
+    except SpeechNotConfiguredError:
+        pass
+    except Exception:
+        logger.exception("voice stage=prewarm result=error")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    task = None
+    tasks = []
     if settings.reservation_sweep_seconds > 0 and settings.database_url:
-        task = asyncio.create_task(_reservation_sweeper(settings.reservation_sweep_seconds))
+        tasks.append(asyncio.create_task(_reservation_sweeper(settings.reservation_sweep_seconds)))
+    if settings.voice_phrase_cache_dir:
+        tasks.append(asyncio.create_task(_prewarm_voice()))
     try:
         yield
     finally:
-        if task is not None:
+        for task in tasks:
             task.cancel()
 
 

@@ -2,7 +2,7 @@
 models, and an executor that runs them through the existing backend services.
 
 Safety properties:
-- Only the four tools below exist; any other name is refused.
+- Only the five tools below exist; any other name is refused.
 - The restaurant is bound by the server (from the URL); it is not a tool
   argument, so the model cannot reach another restaurant's data.
 - Arguments are parsed with ``extra="forbid"`` models: unknown fields such as
@@ -27,10 +27,10 @@ from sqlalchemy.orm import Session
 
 from app.agent.sessions import AgentSession, PendingOrder
 from app.models import Restaurant
-from app.schemas import OrderCreate
 from app.schemas.common import Phone, RequestSchema, ShortText
 from app.models.payment import DEMO_NOTICE
-from app.schemas.order import MAX_LINES_PER_ORDER, Notes, OrderLineRequest
+from app.schemas.order import MAX_LINES_PER_ORDER, MAX_QUANTITY_PER_LINE, Notes, OrderLineRequest
+from app.services import insights
 from app.services import menu_items as menu_service
 from app.services import orders as order_service
 from app.services.common import ConflictError, NotFoundError, UnprocessableError
@@ -65,7 +65,8 @@ class GetMenuItemArgs(RequestSchema):
 
 class CreateOrderArgs(RequestSchema):
     customer_name: ShortText | None = None
-    customer_phone: Phone
+    # Optional while building the cart; required before the order is placed.
+    customer_phone: Phone | None = None
     items: Annotated[list[OrderLineRequest], Field(min_length=1, max_length=MAX_LINES_PER_ORDER)]
     notes: Notes | None = None
 
@@ -74,11 +75,16 @@ class GetOrderStatusArgs(RequestSchema):
     order_number: Annotated[str, Field(pattern=r"^ORD-[0-9]{1,12}$")] | None = None
 
 
+class GetPopularItemsArgs(RequestSchema):
+    limit: Annotated[int, Field(ge=1, le=5)] = 3
+
+
 ARG_MODELS: dict[str, type[BaseModel]] = {
     "get_menu": GetMenuArgs,
     "get_menu_item": GetMenuItemArgs,
     "create_order": CreateOrderArgs,
     "get_order_status": GetOrderStatusArgs,
+    "get_popular_items": GetPopularItemsArgs,
 }
 
 # Hand-written (rather than generated) so the schemas stay plain JSON Schema
@@ -90,18 +96,14 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "get_menu",
             "description": (
-                "Search this restaurant's menu. Returns items with IDs, prices, availability and "
-                "live stock (available_quantity; null means not stock-limited)."
+                "Search the menu; returns items with descriptions, prices and stock."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "search": {"type": "string", "maxLength": 100,
-                               "description": "Words to match in the item name or description."},
-                    "category": {"type": "string", "maxLength": 100,
-                                 "description": "Exact category name, e.g. 'Breakfast'."},
-                    "available_only": {"type": "boolean", "default": True,
-                                       "description": "Only items that can be ordered right now."},
+                    "search": {"type": "string", "maxLength": 100},
+                    "category": {"type": "string", "maxLength": 100},
+                    "available_only": {"type": "boolean", "default": True},
                     "limit": {"type": "integer", "minimum": 1, "maximum": MAX_MENU_RESULTS, "default": 10},
                 },
                 "additionalProperties": False,
@@ -126,25 +128,28 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "create_order",
             "description": (
-                "Prepare an order for the customer to review. This does NOT place the order or "
-                "reserve stock: it checks availability and stock and returns the authoritative "
-                "items and total, which you must read back to the customer. The order is placed "
-                "only after the customer confirms. Call again with the full updated order if "
-                "anything changes (items added, removed or changed)."
+                "Set the complete cart and price it (does not place the order or reserve stock)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "customer_name": {"type": "string", "maxLength": 100},
-                    "customer_phone": {"type": "string", "maxLength": 20,
-                                       "description": "Customer's phone number, e.g. '+91 98765 43210'."},
+                    "customer_phone": {"type": "string", "maxLength": 20},
                     "items": {
                         "type": "array", "minItems": 1, "maxItems": MAX_LINES_PER_ORDER,
                         "items": {
                             "type": "object",
                             "properties": {
                                 "menu_item_id": {"type": "string"},
-                                "quantity": {"type": "integer", "minimum": 1, "maximum": 100},
+                                # No "maximum" here: Groq rejects a whole
+                                # generation that breaks the schema (a caller
+                                # asking for 300 ended the call).  The limit
+                                # is enforced by OrderLineRequest instead,
+                                # whose error the model can explain.
+                                "quantity": {
+                                    "type": "integer", "minimum": 1,
+                                    "description": f"1 to {MAX_QUANTITY_PER_LINE} per item",
+                                },
                             },
                             "required": ["menu_item_id", "quantity"],
                             "additionalProperties": False,
@@ -152,7 +157,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     },
                     "notes": {"type": "string", "maxLength": 500},
                 },
-                "required": ["customer_phone", "items"],
+                "required": ["items"],
                 "additionalProperties": False,
             },
         },
@@ -162,16 +167,27 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "get_order_status",
             "description": (
-                "Look up the current status and (demo) payment status of orders placed in this "
-                "conversation. Use it whenever the customer asks about their order or payment; "
-                "never guess either."
+                "Status and demo payment status of orders placed in this conversation."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "order_number": {"type": "string", "pattern": "^ORD-[0-9]{1,12}$",
-                                     "description": "Optional, e.g. 'ORD-100001'. Omit for all."},
+                    "order_number": {"type": "string", "pattern": "^ORD-[0-9]{1,12}$"},
                 },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_popular_items",
+            "description": (
+                "Most ordered dishes from paid order history, or that history is insufficient."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 5, "default": 3}},
                 "additionalProperties": False,
             },
         },
@@ -251,6 +267,7 @@ class ToolExecutor:
             "get_menu_item": self._get_menu_item,
             "create_order": self._create_order,
             "get_order_status": self._get_order_status,
+            "get_popular_items": self._get_popular_items,
         }
 
     def execute(self, name: str, raw_arguments: str) -> dict[str, Any]:
@@ -304,11 +321,10 @@ class ToolExecutor:
         return {"status": "ok", "item": _menu_item(item, self._restaurant.currency)}
 
     def _create_order(self, args: CreateOrderArgs) -> dict[str, Any]:
-        try:
-            # Same validation the order API applies (e.g. no duplicate items).
-            request = OrderCreate(**args.model_dump())
-        except ValidationError as exc:
-            return _error("invalid_arguments", "Arguments failed validation.", details=_validation_details(exc))
+        # Same rule the order API applies: each item once, quantities combined.
+        if len({line.menu_item_id for line in args.items}) != len(args.items):
+            return _error("invalid_arguments", "Each menu item may appear only once; combine quantities.")
+        request = args
         try:
             quote = order_service.quote_order(self._db, self._restaurant.id, request.items)
         except UnprocessableError as exc:
@@ -346,6 +362,24 @@ class ToolExecutor:
                 "them to confirm. The order is placed only when the customer confirms."
             ),
         }
+
+    def _get_popular_items(self, args: GetPopularItemsArgs) -> dict[str, Any]:
+        result = insights.popular_items(self._db, self._restaurant.id, limit=args.limit)
+        currency = self._restaurant.currency
+        items = [
+            {"name": p.menu_item.name, "units_sold": p.units_sold, "in_orders": p.orders,
+             "price": format_money(p.menu_item.price_paise, currency),
+             "available_now": p.menu_item.orderable}
+            for p in result.items
+        ]  # fmt: skip
+        if not result.sufficient_data:
+            return {
+                "status": "insufficient_data",
+                "paid_orders": result.paid_orders,
+                "minimum_needed": insights.MIN_ORDERS_FOR_POPULARITY,
+                "message": "There is not enough order history to name a most popular dish.",
+            }
+        return {"status": "ok", "paid_orders": result.paid_orders, "most_ordered": items}
 
     def _alternatives(self, excluded: set[uuid.UUID]) -> list[dict[str, Any]]:
         items, _ = menu_service.list_menu_items(

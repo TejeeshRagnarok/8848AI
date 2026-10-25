@@ -40,7 +40,7 @@ class PendingOrder:
     proposal_id: str
     idempotency_key: str
     customer_name: str | None
-    customer_phone: str
+    customer_phone: str | None  # required before the order is placed
     notes: str | None
     quote: OrderQuote
 
@@ -67,8 +67,9 @@ class AgentSession:
     id: str
     restaurant_id: uuid.UUID
     last_used: float
-    # Each turn is the list of chat messages it produced (user, assistant,
-    # tool calls/results); trimmed by whole turns so tool pairs stay intact.
+    # Each turn is what was said: the customer's message and the reply.
+    # Tool calls and results are not kept (each turn gets fresh database
+    # context instead); trimmed by whole turns.
     turns: list[list[dict[str, Any]]] = field(default_factory=list)
     pending: PendingOrder | None = None
     # proposal_id -> order_id for recently confirmed proposals (safe retries).

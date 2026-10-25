@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     app_name: str = "Restaurant AI Voice Agent"
     app_env: str = "development"  # development | staging | production
     debug: bool = True
+    # Also write the application log (calls, turns, provider errors) to this
+    # file, rotated at 5 MB, so evidence survives a restart.  Unset: console only.
+    log_file: str | None = None
 
     # ── Database ─────────────────────────────────────────────────────────────
     # Psycopg 3 URL format: postgresql+psycopg://user:pass@host:port/dbname
@@ -44,12 +47,18 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: SecretStr | None = None
     llm_model: str | None = None
-    llm_timeout_seconds: float = 30.0
+    llm_timeout_seconds: float = 15.0  # a caller is waiting in silence meanwhile
     llm_max_tokens: int = 500
     llm_temperature: float | None = None  # omitted from requests when unset
+    # Sent as "reasoning_effort" for reasoning models (e.g. Groq gpt-oss:
+    # low | medium | high).  Unset: omitted.
+    llm_reasoning_effort: str | None = None
     # On HTTP 429 with a Retry-After of at most this many seconds, wait and
     # retry once (0 disables).  Longer waits fail fast as "unavailable".
-    llm_rate_limit_max_wait_seconds: float = 10.0
+    # Groq's free per-minute token budget (8,000 for gpt-oss) runs out after
+    # a few quick voice turns and asks for 3-15 s pauses; waiting those out
+    # (the caller hears "One moment.") beats an apology and a hang-up.
+    llm_rate_limit_max_wait_seconds: float = 15.0
 
     # ── Agent limits ─────────────────────────────────────────────────────────
     agent_max_model_calls: int = 4  # model round-trips per chat request
@@ -90,6 +99,28 @@ class Settings(BaseSettings):
     exotel_ws_password: SecretStr | None = None
     exotel_sample_rate: int = 8000  # must match the applet's sample-rate (8000 default)
     exotel_greeting: str | None = None  # default: "Welcome to <restaurant>. ..."
+    # Outbound audio chunk size: a multiple of 320 bytes, >= 3200 (100 ms at
+    # 8 kHz is 1600 bytes, so 3200 = 200 ms).  Smaller chunks make barge-in
+    # ("clear") take effect sooner: Exotel only drops chunks not yet playing.
+    exotel_chunk_bytes: int = 3200
+    # Say a short cached "One moment." if a reply takes longer than this
+    # (0 disables).
+    voice_filler_after_ms: int = 2000
+    # Then, if the reply is still not ready (e.g. waiting out a rate limit),
+    # a cached "still working" phrase after this long (0 disables).
+    voice_still_working_after_ms: int = 9000
+    # A whole agent turn (model calls and tools) must finish within this, or
+    # the caller hears an apology instead of silence.  Room for one
+    # rate-limit pause (LLM_RATE_LIMIT_MAX_WAIT_SECONDS) plus the model calls.
+    voice_turn_timeout_seconds: float = 30.0
+    # Close the call socket if Exotel sends no "start" within this, or if a
+    # started call's audio stream goes quiet this long (it streams constantly).
+    voice_start_timeout_seconds: float = 10.0
+    voice_idle_timeout_seconds: float = 20.0
+    # Where synthesised fixed phrases (greeting, apologies, goodbye) are kept,
+    # so they survive restarts and play even when TTS is down or out of quota.
+    # Unset: memory only.
+    voice_phrase_cache_dir: str | None = None
 
     # ── Speech (OpenAI-compatible /audio/transcriptions and /audio/speech) ───
     # Calls are rejected until an API key and both models are set.
@@ -105,7 +136,11 @@ class Settings(BaseSettings):
     tts_model: str | None = None  # e.g. canopylabs/orpheus-v1-english, tts-1
     tts_voice: str = "alloy"  # Groq Orpheus: e.g. troy, hannah, austin
     tts_sample_rate: int = 24000  # rate of OpenAI's raw "pcm" output
-    speech_timeout_seconds: float = 20.0
+    # Per STT/TTS request.  A short phrase takes ~1-2 s; a caller is waiting.
+    speech_timeout_seconds: float = 8.0
+    # On HTTP 429 with a Retry-After of at most this many seconds, wait and
+    # retry once (0 disables): Groq's per-minute TTS budget refills quickly.
+    speech_rate_limit_max_wait_seconds: float = 3.0
 
     # ── Voice activity detection (end of caller's utterance) ─────────────────
     vad_energy_threshold: int = 450  # RMS of 16-bit samples counted as speech

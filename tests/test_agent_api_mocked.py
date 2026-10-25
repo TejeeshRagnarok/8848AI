@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.agent import llm
+from app.agent import service as agent_service
 from app.agent.llm import LLMNotConfiguredError, LLMResponseError, LLMUnavailableError
 from app.agent.prompts import system_prompt
 from app.agent.service import LIMIT_REPLY
@@ -42,6 +43,13 @@ def db() -> MagicMock:
 @pytest.fixture
 def store() -> InMemorySessionStore:
     return InMemorySessionStore(ttl_seconds=60, max_sessions=10)
+
+
+@pytest.fixture(autouse=True)
+def no_menu_query(monkeypatch) -> None:
+    """The mocked session cannot run the per-turn menu query; menu-context
+    behaviour is covered against real PostgreSQL in the live tests."""
+    monkeypatch.setattr(agent_service, "load_menu_context", lambda db, restaurant: [])
 
 
 @pytest.fixture
@@ -242,7 +250,7 @@ class TestInjectionAndClaims:
         assert first[0] == {"role": "system", "content": system_prompt(RESTAURANT)}
         assert first[-1] == {"role": "user", "content": injection}
         assert [t["function"]["name"] for t in provider.requests[0]["tools"]] == [
-            "get_menu", "get_menu_item", "create_order", "get_order_status",
+            "get_menu", "get_menu_item", "create_order", "get_order_status", "get_popular_items",
         ]  # fmt: skip
         tool_result = json.loads(provider.requests[1]["messages"][-1]["content"])
         assert tool_result["error"] == "invalid_arguments"
@@ -271,6 +279,8 @@ class TestInjectionAndClaims:
         first = client.post(URL, json={"message": "Hi"}).json()
         client.post(URL, json={"message": "Something spicy", "session_id": first["session_id"]})
         second_call = provider.requests[1]["messages"]
-        assert [m["content"] for m in second_call[1:]] == [
+        # [0] rules, [1] live database snapshot, then the conversation.
+        assert second_call[1]["role"] == "system" and "Live restaurant data" in second_call[1]["content"]
+        assert [m["content"] for m in second_call[2:]] == [
             "Hi", "Hello! What would you like?", "Something spicy",
         ]  # fmt: skip

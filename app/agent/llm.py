@@ -8,6 +8,7 @@ strings: raw provider responses, URLs and keys never reach callers or logs.
 """
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -130,6 +131,7 @@ class OpenAICompatibleProvider:
         self._model = config.llm_model
         self._max_tokens = config.llm_max_tokens
         self._temperature = config.llm_temperature
+        self._reasoning_effort = config.llm_reasoning_effort
         self._url = config.llm_base_url.rstrip("/") + "/chat/completions"
         self._host = urlsplit(self._url).hostname or "unknown"  # the only part ever logged
         self._client = client or httpx.Client(timeout=httpx.Timeout(config.llm_timeout_seconds))
@@ -145,14 +147,21 @@ class OpenAICompatibleProvider:
         }
         if self._temperature is not None:
             body["temperature"] = self._temperature
+        if self._reasoning_effort:
+            body["reasoning_effort"] = self._reasoning_effort
 
         response = self._post(body)
-        wait = _retry_after(response)
+        wait = retry_after(response)
         if response.status_code == 429 and wait is not None and wait <= self._max_rate_wait:
             # A short rate-limit pause (e.g. a per-minute token budget) is
             # better waited out once than turned into a failed turn or call.
             self._log("rate_limited_retrying", 429)
             self._sleep(wait)
+            response = self._post(body)
+        elif response.status_code == 400 and _error_code(response) == "tool_use_failed":
+            # The model produced a malformed tool call (a generation glitch,
+            # answered quickly); one immediate retry usually succeeds.
+            self._log("tool_use_failed_retrying", 400)
             response = self._post(body)
 
         status = response.status_code
@@ -166,7 +175,7 @@ class OpenAICompatibleProvider:
             self._log("provider_error", status)
             raise LLMUnavailableError("provider_error")
         if status != 200:
-            self._log("unexpected_status", status)
+            self._log(f"unexpected_status:{_error_code(response) or 'unknown'}", status)
             raise LLMResponseError("unexpected_status")
 
         try:
@@ -190,7 +199,17 @@ class OpenAICompatibleProvider:
         logger.warning("LLM request to %s failed: %s (status %s)", self._host, reason, status)
 
 
-def _retry_after(response: httpx.Response) -> float | None:
+def _error_code(response: httpx.Response) -> str | None:
+    """The provider's machine-readable error code (e.g. ``tool_use_failed``),
+    if it is a short identifier; never the message, which may echo input."""
+    try:
+        code = response.json()["error"]["code"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    return code if isinstance(code, str) and re.fullmatch(r"[a-z_]{1,40}", code) else None
+
+
+def retry_after(response: httpx.Response) -> float | None:
     """Seconds from a numeric ``Retry-After`` header, if present."""
     try:
         return max(0.0, float(response.headers["retry-after"]))

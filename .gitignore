@@ -67,3 +67,6 @@ uvicorn_test.log
 
 # Local audio samples (TTS tests)
 *.wav
+
+# Cached synthesised voice phrases (VOICE_PHRASE_CACHE_DIR)
+.cache/

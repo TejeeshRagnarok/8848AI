@@ -26,13 +26,20 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.agent.llm import ChatProvider
-from app.agent.prompts import caller_context, system_prompt, unsupported_claim
+from app.agent.prompts import (
+    MENU_CONTEXT_MAX_ITEMS,
+    caller_context,
+    live_context,
+    system_prompt,
+    unsupported_claim,
+)
 from app.agent.schemas import AgentChatRequest, AgentChatResponse, PendingOrderSummary
 from app.agent.sessions import AgentSession, PendingOrder, SessionStore
 from app.agent.tools import TOOL_DEFINITIONS, ToolExecutor, format_money, proposal_result
 from app.config import Settings, settings
 from app.models import Order, OrderSource, Restaurant
 from app.schemas import OrderCreate, OrderRead
+from app.services import menu_items as menu_service
 from app.services import orders as order_service
 from app.services.common import ConflictError, NotFoundError, UnprocessableError
 from app.services.orders import QuoteChangedError
@@ -44,6 +51,15 @@ LIMIT_REPLY = (
     "Sorry, I couldn't finish that request. Could you tell me again, a little more simply, "
     "what you'd like?"
 )
+
+
+def load_menu_context(db: Session, restaurant: Restaurant) -> list | None:
+    """The whole menu, fresh from the database, if small enough to send with
+    every turn (one query; saves a get_menu round-trip to the model)."""
+    items, total = menu_service.list_menu_items(
+        db, restaurant.id, limit=MENU_CONTEXT_MAX_ITEMS, offset=0
+    )
+    return items if total <= MENU_CONTEXT_MAX_ITEMS else None
 
 
 class RestaurantAgent:
@@ -110,11 +126,11 @@ class RestaurantAgent:
         user_message = {"role": "user", "content": message}
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt(restaurant)},
+            {"role": "system", "content": live_context(restaurant, load_menu_context(self._db, restaurant), session.pending)},
         ]
         if caller_phone:
             messages.append({"role": "system", "content": caller_context(caller_phone)})
         messages += [*session.history(), user_message]
-        turn: list[dict[str, Any]] = [user_message]
         model_calls = tool_calls = 0
         reply = LIMIT_REPLY
 
@@ -128,7 +144,6 @@ class RestaurantAgent:
                 logger.warning("Agent tool-call limit reached")
                 break
             messages.append(response.as_message())
-            turn.append(response.as_message())
             for call in response.tool_calls:
                 result = executor.execute(call.name, call.arguments)
                 tool_calls += 1
@@ -139,15 +154,16 @@ class RestaurantAgent:
                     "content": json.dumps(result, ensure_ascii=False),
                 }
                 messages.append(tool_message)
-                turn.append(tool_message)
         else:
             logger.warning("Agent model-call limit reached")
 
         reply = self._guard(
             reply, session, restaurant, executor.verified_claims, executor.order_statuses
         )
-        turn.append({"role": "assistant", "content": reply})
-        session.add_turn(turn)
+        # History keeps only what was said.  Tool calls and results (menus,
+        # carts) are not replayed: every turn gets a fresh database snapshot
+        # instead, which keeps facts current and the prompt small.
+        session.add_turn([user_message, {"role": "assistant", "content": reply}])
         logger.info("Agent turn: %d model calls, %d tool calls", model_calls, tool_calls)
         return self._response(session, restaurant, reply)
 
@@ -201,6 +217,13 @@ class RestaurantAgent:
         pending = session.pending
         if pending is None or pending.proposal_id != proposal_id:
             raise ConflictError("There is no pending order with that proposal_id to confirm.")
+        if pending.customer_phone is None:
+            # Nothing is placed without a contact number; the cart is kept.
+            reply = (
+                f"{self._describe(pending, restaurant)} Before I place it, which phone number "
+                "should I put on the order?"
+            )
+            return self._finish(session, restaurant, turn, reply)
 
         data = OrderCreate(
             customer_name=pending.customer_name,

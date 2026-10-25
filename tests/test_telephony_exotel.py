@@ -22,6 +22,7 @@ from pydantic import SecretStr
 from sqlalchemy.orm import Session
 from starlette.websockets import WebSocketDisconnect
 
+from app.agent import service as agent_service
 from app.agent.prompts import caller_context
 from app.agent.schemas import AgentChatResponse, PendingOrderSummary
 from app.agent.sessions import InMemorySessionStore
@@ -195,6 +196,8 @@ class TestSpeechProvider:
         ("Here it is:\n\n- 2 × Masala Dosa – INR 80.00\n- 1 × Tea\n\nAnything else?",
          "Here it is: 2 Masala Dosa, 80 rupees. 1 Tea. Anything else?"),
         ("## Menu\n* Idli", "Menu. Idli."),
+        ("Tea (\u20b920) and Idli (\u20b940).", "Tea (20 rupees) and Idli (40 rupees)."),
+        ("Only Rs. 1,250.50 today", "Only 1250 rupees 50 paise today."),
     ])  # fmt: skip
     def test_speakable(self, text, spoken) -> None:
         assert speakable(text) == spoken
@@ -216,6 +219,27 @@ class TestSpeechProvider:
             speech.synthesize("hi", RATE)
         assert exc.value.reason == reason
         assert "secret" not in str(exc.value)
+
+    def test_short_rate_limit_is_waited_out_once(self) -> None:
+        queue = [httpx.Response(429, headers={"retry-after": "2"}), httpx.Response(200, content=tone(300))]
+        waits: list = []
+        client = httpx.Client(transport=httpx.MockTransport(lambda r: queue.pop(0)))
+        speech = OpenAICompatibleSpeech(speech_settings(), client=client, sleep=waits.append)
+        assert speech.synthesize("hello", RATE) and waits == [2.0]
+
+    @pytest.mark.parametrize("responses", [
+        [httpx.Response(429, headers={"retry-after": "30"})],  # too long: fail fast
+        [httpx.Response(429)],  # no Retry-After
+        [httpx.Response(429, headers={"retry-after": "1"})] * 2,  # retried only once
+    ])  # fmt: skip
+    def test_other_rate_limits_fail(self, responses) -> None:
+        queue = list(responses)
+        waits: list = []
+        client = httpx.Client(transport=httpx.MockTransport(lambda r: queue.pop(0)))
+        speech = OpenAICompatibleSpeech(speech_settings(), client=client, sleep=waits.append)
+        with pytest.raises(SpeechUnavailableError) as exc:
+            speech.synthesize("hi", RATE)
+        assert exc.value.reason == "rate_limited" and len(waits) == len(responses) - 1
 
 
 # ── WebSocket call ───────────────────────────────────────────────────────────
@@ -266,6 +290,7 @@ def reply(text: str, pending: PendingOrderSummary | None = None) -> AgentChatRes
 @pytest.fixture
 def call_env(monkeypatch):
     """Install fakes; returns a dict to configure speech/provider/settings."""
+    monkeypatch.setattr(agent_service, "load_menu_context", lambda db, restaurant: [])
     db = MagicMock(spec=Session)
     db.get.return_value = RESTAURANT
     env = {
@@ -273,7 +298,8 @@ def call_env(monkeypatch):
         "provider": ScriptedProvider(),
         "settings": Settings(exotel_restaurant_id=RID, exotel_ws_username=None,
                              exotel_ws_password=None, vad_silence_ms=200,
-                             vad_min_speech_ms=100, exotel_greeting=None),  # fmt: skip
+                             vad_min_speech_ms=100, exotel_greeting=None,
+                             voice_phrase_cache_dir=None),  # fmt: skip
         "db": db,
     }
 
@@ -347,7 +373,7 @@ class TestExotelCall:
         assert call_env["speech"].spoken[0].startswith("Welcome to Spice Garden.")
         assert call_env["speech"].spoken[1] == "Yes, we have masala dosa."
         messages = call_env["provider"].requests[0]["messages"]
-        assert messages[1] == {"role": "system", "content": caller_context("09876543210")}
+        assert messages[2] == {"role": "system", "content": caller_context("09876543210")}
         assert messages[-1] == {"role": "user", "content": "Do you have dosa?"}
 
     def test_voice_yes_confirms_pending_order(self, call_env, monkeypatch) -> None:

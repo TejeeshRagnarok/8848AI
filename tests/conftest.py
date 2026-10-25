@@ -35,6 +35,12 @@ def staff_access() -> Generator[None, None, None]:
         app.dependency_overrides.pop(require_staff, None)
 
 
+@pytest.fixture(autouse=True)
+def no_voice_phrase_disk_cache(monkeypatch) -> None:
+    """Tests never write cached voice audio or prewarm it with the real TTS."""
+    monkeypatch.setattr(settings, "voice_phrase_cache_dir", None)
+
+
 @pytest.fixture(scope="session")
 def engine() -> Generator[Engine, None, None]:
     if not settings.database_url:

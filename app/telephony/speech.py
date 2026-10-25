@@ -10,11 +10,13 @@ responses, URLs and keys never reach callers or logs.
 
 import logging
 import re
+import time
 from typing import Protocol
 from urllib.parse import urlsplit
 
 import httpx
 
+from app.agent.llm import retry_after
 from app.config import Settings, settings
 from app.telephony.audio import from_wav, resample, to_wav
 
@@ -24,13 +26,17 @@ GROQ_TTS_MAX_CHARS = 200  # Groq Orpheus input limit per request
 
 
 _MONEY = re.compile(r"\bINR\s?([\d,]+)\.(\d{2})\b")
+_RUPEE_SYMBOL = re.compile(r"(?:\u20b9|\bRs\.?)\s?([\d,]+)(?:\.(\d{2}))?")
 _ORDER_NUMBER = re.compile(r"\bORD[-‐‑]?(\d+)\b")
 
 
-def _rupees(match: re.Match) -> str:
-    rupees, paise = match.group(1).replace(",", ""), match.group(2)
-    words = f"{int(rupees)} rupees"
+def _rupees_text(rupees: str, paise: str) -> str:
+    words = f"{int(rupees.replace(',', ''))} rupees"
     return words if paise == "00" else f"{words} {int(paise)} paise"
+
+
+def _rupees(match: re.Match) -> str:
+    return _rupees_text(match.group(1), match.group(2))
 
 
 def speakable(text: str) -> str:
@@ -48,6 +54,7 @@ def speakable(text: str) -> str:
     spoken = " ".join(lines)
     spoken = spoken.replace("×", " ").replace("–", ",").replace("—", ",")
     spoken = _MONEY.sub(_rupees, spoken)
+    spoken = _RUPEE_SYMBOL.sub(lambda m: _rupees_text(m.group(1), m.group(2) or "00"), spoken)
     spoken = _ORDER_NUMBER.sub(lambda m: "order " + " ".join(m.group(1)), spoken)
     spoken = re.sub(r"\s+([.,!?])", r"\1", spoken)
     return re.sub(r"\s{2,}", " ", spoken).strip()
@@ -102,9 +109,13 @@ class TextToSpeech(Protocol):
 class OpenAICompatibleSpeech:
     """Both directions through one OpenAI-compatible audio API."""
 
-    def __init__(self, config: Settings, client: httpx.Client | None = None) -> None:
+    def __init__(
+        self, config: Settings, client: httpx.Client | None = None, sleep=time.sleep
+    ) -> None:
         if config.speech_api_key is None or not config.stt_model or not config.tts_model:
             raise SpeechNotConfiguredError()
+        self._max_rate_wait = config.speech_rate_limit_max_wait_seconds
+        self._sleep = sleep
         base = config.speech_base_url.rstrip("/")
         self._stt_url = base + "/audio/transcriptions"
         self._tts_url = base + "/audio/speech"
@@ -132,6 +143,18 @@ class OpenAICompatibleSpeech:
         if not isinstance(text, str):
             raise SpeechUnavailableError("invalid_transcription")
         return text.strip()
+
+    @property
+    def voice_signature(self) -> str:
+        """Identifies the voice, for caching synthesised audio."""
+        return f"{self._provider}|{self._tts_model}|{self._voice}|{self._tts_rate}"
+
+    def pieces(self, text: str) -> list[str]:
+        """How a reply is split into separate synthesis requests (so the
+        first piece can be played while the next is generated)."""
+        if self._provider == "groq":
+            return split_text(text, GROQ_TTS_MAX_CHARS)
+        return [text]
 
     def synthesize(self, text: str, sample_rate: int) -> bytes:
         if self._provider == "groq":
@@ -165,20 +188,29 @@ class OpenAICompatibleSpeech:
         return resample(pcm, rate, sample_rate)
 
     def _post(self, url: str, **kwargs) -> httpx.Response:
-        try:
-            response = self._client.post(url, headers=self._headers, **kwargs)
-        except httpx.TimeoutException:
-            self._log("timeout")
-            raise SpeechUnavailableError("timeout") from None
-        except httpx.HTTPError:
-            self._log("connection_error")
-            raise SpeechUnavailableError("connection_error") from None
+        response = self._send(url, **kwargs)
+        wait = retry_after(response)
+        if response.status_code == 429 and wait is not None and wait <= self._max_rate_wait:
+            # A per-minute budget refills within seconds: wait once, retry once.
+            self._log("rate_limited_retrying", 429)
+            self._sleep(wait)
+            response = self._send(url, **kwargs)
         if response.status_code != 200:
             reason = {401: "authentication_failed", 403: "authentication_failed",
                       429: "rate_limited"}.get(response.status_code, "provider_error")  # fmt: skip
             self._log(reason, response.status_code)
             raise SpeechUnavailableError(reason)
         return response
+
+    def _send(self, url: str, **kwargs) -> httpx.Response:
+        try:
+            return self._client.post(url, headers=self._headers, **kwargs)
+        except httpx.TimeoutException:
+            self._log("timeout")
+            raise SpeechUnavailableError("timeout") from None
+        except httpx.HTTPError:
+            self._log("connection_error")
+            raise SpeechUnavailableError("connection_error") from None
 
     def _log(self, reason: str, status: int | None = None) -> None:
         logger.warning("Speech request to %s failed: %s (status %s)", self._host, reason, status)
